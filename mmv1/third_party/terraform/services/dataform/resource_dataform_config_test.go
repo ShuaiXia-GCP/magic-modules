@@ -1,0 +1,199 @@
+package dataform_test
+
+import (
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+
+	"github.com/hashicorp/terraform-provider-google/google/acctest"
+	_ "github.com/hashicorp/terraform-provider-google/google/services/dataform"
+	_ "github.com/hashicorp/terraform-provider-google/google/services/kms"
+	_ "github.com/hashicorp/terraform-provider-google/google/services/resourcemanager"
+)
+
+func TestAccDataformConfig_update(t *testing.T) {
+	t.Parallel()
+
+	context := map[string]interface{}{
+		"random_suffix": acctest.RandString(t, 10),
+	}
+
+	acctest.VcrTest(t, resource.TestCase{
+		PreCheck:                 func() { acctest.AccTestPreCheck(t) },
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories(t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccDataformConfig_full(context),
+			},
+			{
+				ResourceName:      "google_dataform_config.config",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// region is url_param_only and not returned in the API response body
+				ImportStateVerifyIgnore: []string{"region"},
+			},
+			{
+				Config: testAccDataformConfig_update(context),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("google_dataform_config.config", plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				ResourceName:      "google_dataform_config.config",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// region is url_param_only and not returned in the API response body
+				ImportStateVerifyIgnore: []string{"region"},
+			},
+			{
+				Config: testAccDataformConfig_updateToZeroValue(context),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("google_dataform_config.config", plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+			{
+				ResourceName:      "google_dataform_config.config",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// region is url_param_only and not returned in the API response body
+				ImportStateVerifyIgnore: []string{"region"},
+			},
+		},
+	})
+}
+
+func testAccDataformConfig_full(context map[string]interface{}) string {
+	return acctest.Nprintf(`
+data "google_project" "project" {
+}
+
+resource "google_kms_key_ring" "keyring" {
+  name     = "tf-test-example-key-ring%{random_suffix}"
+  location = "europe-west1"
+}
+
+resource "google_kms_crypto_key" "example_key_1" {
+  name     = "tf-test-example-crypto-key-name-1-%{random_suffix}"
+  key_ring = google_kms_key_ring.keyring.id
+}
+
+resource "google_kms_crypto_key" "example_key_2" {
+  name     = "tf-test-example-crypto-key-name-2-%{random_suffix}"
+  key_ring = google_kms_key_ring.keyring.id
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key_1_binding" {
+  crypto_key_id = google_kms_crypto_key.example_key_1.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-dataform.iam.gserviceaccount.com"
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key_2_binding" {
+  crypto_key_id = google_kms_crypto_key.example_key_2.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-dataform.iam.gserviceaccount.com"
+}
+
+resource "google_dataform_config" "config" {
+  region               = "europe-west1"
+  default_kms_key_name = google_kms_crypto_key.example_key_1.id
+
+  depends_on = [
+    google_kms_crypto_key_iam_member.crypto_key_1_binding,
+    google_kms_crypto_key_iam_member.crypto_key_2_binding,
+  ]
+}
+`, context)
+}
+
+func testAccDataformConfig_update(context map[string]interface{}) string {
+	return acctest.Nprintf(`
+data "google_project" "project" {
+}
+
+resource "google_kms_key_ring" "keyring" {
+  name     = "tf-test-example-key-ring%{random_suffix}"
+  location = "europe-west1"
+}
+
+resource "google_kms_crypto_key" "example_key_1" {
+  name     = "tf-test-example-crypto-key-name-1-%{random_suffix}"
+  key_ring = google_kms_key_ring.keyring.id
+}
+
+resource "google_kms_crypto_key" "example_key_2" {
+  name     = "tf-test-example-crypto-key-name-2-%{random_suffix}"
+  key_ring = google_kms_key_ring.keyring.id
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key_1_binding" {
+  crypto_key_id = google_kms_crypto_key.example_key_1.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-dataform.iam.gserviceaccount.com"
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key_2_binding" {
+  crypto_key_id = google_kms_crypto_key.example_key_2.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-dataform.iam.gserviceaccount.com"
+}
+
+resource "google_dataform_config" "config" {
+  region               = "europe-west1"
+  default_kms_key_name = google_kms_crypto_key.example_key_2.id
+
+  depends_on = [
+    google_kms_crypto_key_iam_member.crypto_key_1_binding,
+    google_kms_crypto_key_iam_member.crypto_key_2_binding,
+  ]
+}
+`, context)
+}
+
+func testAccDataformConfig_updateToZeroValue(context map[string]interface{}) string {
+	return acctest.Nprintf(`
+data "google_project" "project" {
+}
+
+resource "google_kms_key_ring" "keyring" {
+  name     = "tf-test-example-key-ring%{random_suffix}"
+  location = "europe-west1"
+}
+
+resource "google_kms_crypto_key" "example_key_1" {
+  name     = "tf-test-example-crypto-key-name-1-%{random_suffix}"
+  key_ring = google_kms_key_ring.keyring.id
+}
+
+resource "google_kms_crypto_key" "example_key_2" {
+  name     = "tf-test-example-crypto-key-name-2-%{random_suffix}"
+  key_ring = google_kms_key_ring.keyring.id
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key_1_binding" {
+  crypto_key_id = google_kms_crypto_key.example_key_1.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-dataform.iam.gserviceaccount.com"
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key_2_binding" {
+  crypto_key_id = google_kms_crypto_key.example_key_2.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-dataform.iam.gserviceaccount.com"
+}
+
+resource "google_dataform_config" "config" {
+  region = "europe-west1"
+
+  depends_on = [
+    google_kms_crypto_key_iam_member.crypto_key_1_binding,
+    google_kms_crypto_key_iam_member.crypto_key_2_binding,
+  ]
+}
+`, context)
+}
