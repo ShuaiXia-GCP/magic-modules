@@ -6,8 +6,11 @@ import (
 	"testing"
 
 	"github.com/hashicorp/go-cty/cty"
+	"github.com/hashicorp/go-cty/cty/msgpack"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov5"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	transport_tpg "github.com/hashicorp/terraform-provider-google/google/transport"
 )
 
 func TestMaintenanceVersionDiffSuppress(t *testing.T) {
@@ -500,4 +503,364 @@ func TestBlueGreenDeployment_CompareConfiguredField_SensitiveRedaction(t *testin
 			t.Errorf("security violation: plaintext secret %q leaked in mismatches: %s", secret, joinedMismatches)
 		}
 	}
+}
+
+func TestFollowGaeApplicationDiffSuppress(t *testing.T) {
+	res := ResourceSqlDatabaseInstance()
+	locPrefType := cty.Object(map[string]cty.Type{
+		"follow_gae_application": cty.String,
+		"zone":                   cty.String,
+		"secondary_zone":         cty.String,
+	})
+	settingsElemType := cty.Object(map[string]cty.Type{
+		"tier":                cty.String,
+		"location_preference": cty.List(locPrefType),
+	})
+
+	makeRawConfig := func(locPrefList cty.Value) cty.Value {
+		return cty.ObjectVal(map[string]cty.Value{
+			"name": cty.StringVal("tf-test-instance"),
+			"settings": cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"tier":                cty.StringVal("db-f1-micro"),
+					"location_preference": locPrefList,
+				}),
+			}),
+		})
+	}
+
+	makeRD := func(rawCfg cty.Value) *schema.ResourceData {
+		return res.Data(&terraform.InstanceState{
+			ID:        "tf-test-instance",
+			RawConfig: rawCfg,
+		})
+	}
+
+	cases := map[string]struct {
+		oldVal         string
+		newVal         string
+		rd             *schema.ResourceData
+		shouldSuppress bool
+	}{
+		"follow_gae_application explicitly null in raw config suppresses empty diff": {
+			oldVal: "",
+			newVal: "",
+			rd: makeRD(makeRawConfig(cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"follow_gae_application": cty.NullVal(cty.String),
+					"zone":                   cty.StringVal("us-central1-a"),
+					"secondary_zone":         cty.NullVal(cty.String),
+				}),
+			}))),
+			shouldSuppress: true,
+		},
+		"follow_gae_application omitted in location_preference block suppresses empty diff": {
+			oldVal: "",
+			newVal: "",
+			rd: makeRD(cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("tf-test-instance"),
+				"settings": cty.ListVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"tier": cty.StringVal("db-f1-micro"),
+						"location_preference": cty.ListVal([]cty.Value{
+							cty.ObjectVal(map[string]cty.Value{
+								"follow_gae_application": cty.NullVal(cty.String),
+								"zone":                   cty.StringVal("us-central1-a"),
+							}),
+						}),
+					}),
+				}),
+			})),
+			shouldSuppress: true,
+		},
+		"location_preference block omitted (empty list) in raw config suppresses empty diff": {
+			oldVal:         "",
+			newVal:         "",
+			rd:             makeRD(makeRawConfig(cty.ListValEmpty(locPrefType))),
+			shouldSuppress: true,
+		},
+		"settings block omitted (empty list) in raw config suppresses empty diff": {
+			oldVal: "",
+			newVal: "",
+			rd: makeRD(cty.ObjectVal(map[string]cty.Value{
+				"name":     cty.StringVal("tf-test-instance"),
+				"settings": cty.ListValEmpty(settingsElemType),
+			})),
+			shouldSuppress: true,
+		},
+		"marked (sensitive) null follow_gae_application in raw config suppresses empty diff without panic": {
+			oldVal: "",
+			newVal: "",
+			rd: makeRD(makeRawConfig(cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"follow_gae_application": cty.NullVal(cty.String).Mark("sensitive"),
+					"zone":                   cty.StringVal("us-central1-a"),
+					"secondary_zone":         cty.NullVal(cty.String),
+				}),
+			}))),
+			shouldSuppress: true,
+		},
+		"explicit empty string follow_gae_application in raw config is NOT suppressed": {
+			oldVal: "",
+			newVal: "",
+			rd: makeRD(makeRawConfig(cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"follow_gae_application": cty.StringVal(""),
+					"zone":                   cty.StringVal("us-central1-a"),
+					"secondary_zone":         cty.NullVal(cty.String),
+				}),
+			}))),
+			shouldSuppress: false,
+		},
+		"marked explicit empty string follow_gae_application in raw config is NOT suppressed": {
+			oldVal: "",
+			newVal: "",
+			rd: makeRD(makeRawConfig(cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"follow_gae_application": cty.StringVal("").Mark("sensitive"),
+					"zone":                   cty.StringVal("us-central1-a"),
+					"secondary_zone":         cty.NullVal(cty.String),
+				}),
+			}))),
+			shouldSuppress: false,
+		},
+		"explicit non-empty follow_gae_application in raw config is NOT suppressed": {
+			oldVal: "",
+			newVal: "my-gae-app",
+			rd: makeRD(makeRawConfig(cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"follow_gae_application": cty.StringVal("my-gae-app"),
+					"zone":                   cty.StringVal("us-central1-a"),
+					"secondary_zone":         cty.NullVal(cty.String),
+				}),
+			}))),
+			shouldSuppress: false,
+		},
+		"non-empty old value with null in raw config is NOT suppressed": {
+			oldVal: "legacy-app",
+			newVal: "",
+			rd: makeRD(makeRawConfig(cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"follow_gae_application": cty.NullVal(cty.String),
+					"zone":                   cty.StringVal("us-central1-a"),
+					"secondary_zone":         cty.NullVal(cty.String),
+				}),
+			}))),
+			shouldSuppress: false,
+		},
+		"nil ResourceData does NOT panic and is NOT suppressed": {
+			oldVal:         "",
+			newVal:         "",
+			rd:             nil,
+			shouldSuppress: false,
+		},
+		"null RawConfig does NOT panic and is NOT suppressed": {
+			oldVal:         "",
+			newVal:         "",
+			rd:             res.Data(nil),
+			shouldSuppress: false,
+		},
+		"unknown RawConfig does NOT panic and is NOT suppressed": {
+			oldVal:         "",
+			newVal:         "",
+			rd:             makeRD(cty.DynamicVal),
+			shouldSuppress: false,
+		},
+		"unknown location_preference list does NOT panic and is NOT suppressed": {
+			oldVal:         "",
+			newVal:         "",
+			rd:             makeRD(makeRawConfig(cty.UnknownVal(cty.List(locPrefType)))),
+			shouldSuppress: false,
+		},
+		"unknown follow_gae_application value does NOT panic and is NOT suppressed": {
+			oldVal: "",
+			newVal: "",
+			rd: makeRD(makeRawConfig(cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"follow_gae_application": cty.UnknownVal(cty.String),
+					"zone":                   cty.StringVal("us-central1-a"),
+					"secondary_zone":         cty.NullVal(cty.String),
+				}),
+			}))),
+			shouldSuppress: false,
+		},
+	}
+
+	for name, tc := range cases {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := followGaeApplicationDiffSuppress("settings.0.location_preference.0.follow_gae_application", tc.oldVal, tc.newVal, tc.rd)
+			if got != tc.shouldSuppress {
+				t.Fatalf("followGaeApplicationDiffSuppress(old=%q, new=%q) = %t, want %t", tc.oldVal, tc.newVal, got, tc.shouldSuppress)
+			}
+		})
+	}
+}
+
+func TestFollowGaeApplicationPlanResourceChange(t *testing.T) {
+	res := ResourceSqlDatabaseInstance()
+	p := &schema.Provider{
+		ResourcesMap: map[string]*schema.Resource{
+			"google_sql_database_instance": res,
+		},
+	}
+	p.SetMeta(&transport_tpg.Config{Project: "test-project", Region: "us-central1"})
+	server := schema.NewGRPCProviderServer(p)
+
+	schemaBlock := res.CoreConfigSchema()
+	impliedType := schemaBlock.ImpliedType()
+
+	buildInstanceVal := func(isConfig bool, followGaeApp cty.Value, zone string, envLabel string) cty.Value {
+		rootMap := schemaBlock.EmptyValue().AsValueMap()
+		rootMap["name"] = cty.StringVal("tf-test-instance")
+		rootMap["database_version"] = cty.StringVal("POSTGRES_15")
+		rootMap["region"] = cty.StringVal("us-central1")
+		rootMap["deletion_protection"] = cty.BoolVal(false)
+
+		if !isConfig {
+			rootMap["id"] = cty.StringVal("tf-test-instance")
+			rootMap["project"] = cty.StringVal("test-project")
+			rootMap["deletion_policy"] = cty.StringVal("DELETE")
+		}
+
+		settingsBlock := schemaBlock.BlockTypes["settings"].Block
+		settingsMap := settingsBlock.EmptyValue().AsValueMap()
+		settingsMap["tier"] = cty.StringVal("db-f1-micro")
+		settingsMap["user_labels"] = cty.MapVal(map[string]cty.Value{"env": cty.StringVal(envLabel)})
+		if !isConfig {
+			settingsMap["activation_policy"] = cty.StringVal("ALWAYS")
+			settingsMap["availability_type"] = cty.StringVal("ZONAL")
+			settingsMap["disk_autoresize"] = cty.BoolVal(true)
+			settingsMap["disk_autoresize_limit"] = cty.NumberIntVal(0)
+			settingsMap["disk_size"] = cty.NumberIntVal(10)
+			settingsMap["disk_type"] = cty.StringVal("PD_SSD")
+			settingsMap["edition"] = cty.StringVal("ENTERPRISE")
+			settingsMap["pricing_plan"] = cty.StringVal("PER_USE")
+		}
+
+		locPrefBlock := settingsBlock.BlockTypes["location_preference"].Block
+		locPrefMap := locPrefBlock.EmptyValue().AsValueMap()
+		locPrefMap["follow_gae_application"] = followGaeApp
+		locPrefMap["zone"] = cty.StringVal(zone)
+		if !isConfig {
+			locPrefMap["secondary_zone"] = cty.StringVal("")
+		}
+
+		settingsMap["location_preference"] = cty.ListVal([]cty.Value{cty.ObjectVal(locPrefMap)})
+		rootMap["settings"] = cty.ListVal([]cty.Value{cty.ObjectVal(settingsMap)})
+		return cty.ObjectVal(rootMap)
+	}
+
+	runPlan := func(t *testing.T, srv *schema.GRPCProviderServer, typeName string, ty cty.Type, priorVal, configVal, proposedVal cty.Value) cty.Value {
+		t.Helper()
+		priorMP, err := msgpack.Marshal(priorVal, ty)
+		if err != nil {
+			t.Fatalf("marshal prior: %v", err)
+		}
+		configMP, err := msgpack.Marshal(configVal, ty)
+		if err != nil {
+			t.Fatalf("marshal config: %v", err)
+		}
+		proposedMP, err := msgpack.Marshal(proposedVal, ty)
+		if err != nil {
+			t.Fatalf("marshal proposed: %v", err)
+		}
+		resp, err := srv.PlanResourceChange(context.Background(), &tfprotov5.PlanResourceChangeRequest{
+			TypeName:         typeName,
+			PriorState:       &tfprotov5.DynamicValue{MsgPack: priorMP},
+			Config:           &tfprotov5.DynamicValue{MsgPack: configMP},
+			ProposedNewState: &tfprotov5.DynamicValue{MsgPack: proposedMP},
+		})
+		if err != nil {
+			t.Fatalf("PlanResourceChange error: %v", err)
+		}
+		if len(resp.Diagnostics) > 0 {
+			t.Fatalf("PlanResourceChange diagnostics: %+v", resp.Diagnostics)
+		}
+		plannedVal, err := msgpack.Unmarshal(resp.PlannedState.MsgPack, ty)
+		if err != nil {
+			t.Fatalf("unmarshal planned: %v", err)
+		}
+		return plannedVal
+	}
+
+	extractFollowGae := func(v cty.Value) cty.Value {
+		return v.GetAttr("settings").Index(cty.NumberIntVal(0)).
+			GetAttr("location_preference").Index(cty.NumberIntVal(0)).
+			GetAttr("follow_gae_application")
+	}
+
+	t.Run("null config with empty prior state and no other changes produces empty plan", func(t *testing.T) {
+		priorVal := buildInstanceVal(false, cty.StringVal(""), "us-central1-a", "initial")
+		configVal := buildInstanceVal(true, cty.NullVal(cty.String), "us-central1-a", "initial")
+		proposedVal := buildInstanceVal(false, cty.NullVal(cty.String), "us-central1-a", "initial")
+
+		plannedVal := runPlan(t, server, "google_sql_database_instance", impliedType, priorVal, configVal, proposedVal)
+		got := extractFollowGae(plannedVal)
+		if !got.RawEquals(cty.StringVal("")) {
+			t.Fatalf("expected planned follow_gae_application to remain %q (no \"\" -> null diff), got %#v", "", got)
+		}
+	})
+
+	t.Run("null config with empty prior state and sibling settings update produces no phantom diff", func(t *testing.T) {
+		priorVal := buildInstanceVal(false, cty.StringVal(""), "us-central1-a", "initial")
+		configVal := buildInstanceVal(true, cty.NullVal(cty.String), "us-central1-c", "updated")
+		proposedVal := buildInstanceVal(false, cty.NullVal(cty.String), "us-central1-c", "updated")
+
+		plannedVal := runPlan(t, server, "google_sql_database_instance", impliedType, priorVal, configVal, proposedVal)
+		got := extractFollowGae(plannedVal)
+		if !got.RawEquals(cty.StringVal("")) {
+			t.Fatalf("expected planned follow_gae_application to remain %q (no \"\" -> null diff), got %#v", "", got)
+		}
+		gotZone := plannedVal.GetAttr("settings").Index(cty.NumberIntVal(0)).
+			GetAttr("location_preference").Index(cty.NumberIntVal(0)).
+			GetAttr("zone")
+		if !gotZone.RawEquals(cty.StringVal("us-central1-c")) {
+			t.Fatalf("expected sibling zone update to be preserved, got %#v", gotZone)
+		}
+	})
+
+	t.Run("explicit empty string in config is not suppressed", func(t *testing.T) {
+		priorVal := buildInstanceVal(false, cty.NullVal(cty.String), "us-central1-a", "initial")
+		configVal := buildInstanceVal(true, cty.StringVal(""), "us-central1-a", "initial")
+		proposedVal := buildInstanceVal(false, cty.StringVal(""), "us-central1-a", "initial")
+
+		plannedVal := runPlan(t, server, "google_sql_database_instance", impliedType, priorVal, configVal, proposedVal)
+		got := extractFollowGae(plannedVal)
+		if !got.RawEquals(cty.StringVal("")) {
+			t.Fatalf("expected explicit empty string follow_gae_application to be planned as %q, got %#v", "", got)
+		}
+
+		priorNonEmpty := buildInstanceVal(false, cty.StringVal("legacy-gae-app"), "us-central1-a", "initial")
+		plannedFromNonEmpty := runPlan(t, server, "google_sql_database_instance", impliedType, priorNonEmpty, configVal, proposedVal)
+		gotFromNonEmpty := extractFollowGae(plannedFromNonEmpty)
+		if !gotFromNonEmpty.RawEquals(cty.StringVal("")) {
+			t.Fatalf("expected explicit empty string from non-empty state to plan %q, got %#v", "", gotFromNonEmpty)
+		}
+	})
+
+	t.Run("explicit non-empty value in config is not suppressed", func(t *testing.T) {
+		priorVal := buildInstanceVal(false, cty.StringVal(""), "us-central1-a", "initial")
+		configVal := buildInstanceVal(true, cty.StringVal("my-gae-app"), "us-central1-a", "initial")
+		proposedVal := buildInstanceVal(false, cty.StringVal("my-gae-app"), "us-central1-a", "initial")
+
+		plannedVal := runPlan(t, server, "google_sql_database_instance", impliedType, priorVal, configVal, proposedVal)
+		got := extractFollowGae(plannedVal)
+		if !got.RawEquals(cty.StringVal("my-gae-app")) {
+			t.Fatalf("expected explicit follow_gae_application to be planned as %q, got %#v", "my-gae-app", got)
+		}
+	})
+
+	t.Run("non-empty prior state with null config is not suppressed", func(t *testing.T) {
+		priorVal := buildInstanceVal(false, cty.StringVal("legacy-gae-app"), "us-central1-a", "initial")
+		configVal := buildInstanceVal(true, cty.NullVal(cty.String), "us-central1-a", "initial")
+		proposedVal := buildInstanceVal(false, cty.NullVal(cty.String), "us-central1-a", "initial")
+
+		plannedVal := runPlan(t, server, "google_sql_database_instance", impliedType, priorVal, configVal, proposedVal)
+		got := extractFollowGae(plannedVal)
+		if !got.IsNull() {
+			t.Fatalf("expected non-empty prior follow_gae_application removal to plan null, got %#v", got)
+		}
+	})
 }

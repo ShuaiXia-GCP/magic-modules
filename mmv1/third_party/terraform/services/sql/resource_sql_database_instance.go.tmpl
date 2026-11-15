@@ -827,10 +827,11 @@ API (for read pools, effective_availability_type may differ from availability_ty
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
 									"follow_gae_application": {
-										Type:         schema.TypeString,
-										Optional:     true,
-										AtLeastOneOf: []string{"settings.0.location_preference.0.follow_gae_application", "settings.0.location_preference.0.zone"},
-										Description:  `A Google App Engine application whose zone to remain in. Must be in the same region as this instance.`,
+										Type:             schema.TypeString,
+										Optional:         true,
+										DiffSuppressFunc: followGaeApplicationDiffSuppress,
+										AtLeastOneOf:     []string{"settings.0.location_preference.0.follow_gae_application", "settings.0.location_preference.0.zone"},
+										Description:      `A Google App Engine application whose zone to remain in. Must be in the same region as this instance.`,
 									},
 									"zone": {
 										Type:         schema.TypeString,
@@ -3500,6 +3501,79 @@ func denyMaintenancePeriodDateDiffSuppress(_, old, new string, _ *schema.Resourc
 		return false
 	}
 	return oldYear == newYear && oldMonth == newMonth && oldDay == newDay
+}
+
+// followGaeApplicationDiffSuppress suppresses phantom "" -> null diffs on
+// settings.0.location_preference.0.follow_gae_application when the attribute is
+// unset/null in the user's raw configuration and the API returns the proto3 default "".
+// Explicit values in configuration (including "") are never suppressed.
+func followGaeApplicationDiffSuppress(_, old, new string, d *schema.ResourceData) bool {
+	if old != "" || new != "" || d == nil {
+		return false
+	}
+
+	rawConfig, _ := d.GetRawConfig().Unmark()
+	if rawConfig.IsNull() || !rawConfig.IsKnown() || !rawConfig.Type().IsObjectType() || !rawConfig.Type().HasAttribute("settings") {
+		return false
+	}
+
+	settingsVal, _ := rawConfig.GetAttr("settings").Unmark()
+	if !settingsVal.IsKnown() {
+		return false
+	}
+	if settingsVal.IsNull() {
+		return true
+	}
+	if !settingsVal.Type().IsListType() && !settingsVal.Type().IsTupleType() {
+		return false
+	}
+	settingsSlice := settingsVal.AsValueSlice()
+	if len(settingsSlice) == 0 {
+		return true
+	}
+
+	settingsElem, _ := settingsSlice[0].Unmark()
+	if !settingsElem.IsKnown() {
+		return false
+	}
+	if settingsElem.IsNull() {
+		return true
+	}
+	if !settingsElem.Type().IsObjectType() || !settingsElem.Type().HasAttribute("location_preference") {
+		return false
+	}
+
+	locPrefVal, _ := settingsElem.GetAttr("location_preference").Unmark()
+	if !locPrefVal.IsKnown() {
+		return false
+	}
+	if locPrefVal.IsNull() {
+		return true
+	}
+	if !locPrefVal.Type().IsListType() && !locPrefVal.Type().IsTupleType() {
+		return false
+	}
+	locPrefSlice := locPrefVal.AsValueSlice()
+	if len(locPrefSlice) == 0 {
+		return true
+	}
+
+	locPrefElem, _ := locPrefSlice[0].Unmark()
+	if !locPrefElem.IsKnown() {
+		return false
+	}
+	if locPrefElem.IsNull() {
+		return true
+	}
+	if !locPrefElem.Type().IsObjectType() || !locPrefElem.Type().HasAttribute("follow_gae_application") {
+		return false
+	}
+
+	followGaeVal, _ := locPrefElem.GetAttr("follow_gae_application").Unmark()
+	if !followGaeVal.IsKnown() {
+		return false
+	}
+	return followGaeVal.IsNull()
 }
 
 func resourceSqlDatabaseInstanceDelete(d *schema.ResourceData, meta interface{}) error {

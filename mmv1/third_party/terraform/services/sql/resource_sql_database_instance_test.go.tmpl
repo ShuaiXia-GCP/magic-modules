@@ -11859,3 +11859,121 @@ func testGoogleSqlDatabaseInstance_blueGreenDeployment_cluster_sameVersion(prima
 `, deploymentName, activeEnv, deleteOldSource)
 	return testGoogleSqlDatabaseInstance_blueGreenDeployment_cluster_base(primaryName, replicaName, primaryDbVer, replicaDbVer, bgdBlock)
 }
+
+func TestAccSqlDatabaseInstance_followGaeApplicationNull(t *testing.T) {
+	t.Parallel()
+
+	instanceName := "tf-test-" + acctest.RandString(t, 10)
+
+	acctest.VcrTest(t, resource.TestCase{
+		PreCheck:                 func() { acctest.AccTestPreCheck(t) },
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories(t),
+		CheckDestroy:             testAccSqlDatabaseInstanceDestroyProducer(t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccSqlDatabaseInstance_followGaeApplicationNull(instanceName),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("google_sql_database_instance.instance", "settings.0.location_preference.0.zone", "us-central1-a"),
+					resource.TestCheckResourceAttr("google_sql_database_instance.instance", "settings.0.location_preference.0.follow_gae_application", ""),
+				),
+			},
+			{
+				Config:             testAccSqlDatabaseInstance_followGaeApplicationNull(instanceName),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+			{
+				Config: testAccSqlDatabaseInstance_followGaeApplicationNull_updatedLabels(instanceName),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("google_sql_database_instance.instance", plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("google_sql_database_instance.instance", "settings.0.user_labels.env", "updated"),
+					resource.TestCheckResourceAttr("google_sql_database_instance.instance", "settings.0.location_preference.0.follow_gae_application", ""),
+				),
+			},
+			{
+				Config:             testAccSqlDatabaseInstance_followGaeApplicationNull_updatedLabels(instanceName),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+			{
+				Config: testAccSqlDatabaseInstance_followGaeApplicationNull_viaVariable(instanceName),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("google_sql_database_instance.instance", plancheck.ResourceActionNoop),
+					},
+				},
+			},
+		},
+	})
+}
+
+func testAccSqlDatabaseInstance_followGaeApplicationNull(instanceName string) string {
+	return fmt.Sprintf(`
+resource "google_sql_database_instance" "instance" {
+  name                = "%s"
+  database_version    = "POSTGRES_15"
+  region              = "us-central1"
+  deletion_protection = false
+
+  settings {
+    tier = "db-f1-micro"
+
+    location_preference {
+      zone                   = "us-central1-a"
+      follow_gae_application = null
+    }
+  }
+}
+`, instanceName)
+}
+
+func testAccSqlDatabaseInstance_followGaeApplicationNull_updatedLabels(instanceName string) string {
+	return fmt.Sprintf(`
+resource "google_sql_database_instance" "instance" {
+  name                = "%s"
+  database_version    = "POSTGRES_15"
+  region              = "us-central1"
+  deletion_protection = false
+
+  settings {
+    tier        = "db-f1-micro"
+    user_labels = { env = "updated" }
+
+    location_preference {
+      zone                   = "us-central1-a"
+      follow_gae_application = null
+    }
+  }
+}
+`, instanceName)
+}
+
+func testAccSqlDatabaseInstance_followGaeApplicationNull_viaVariable(instanceName string) string {
+	return fmt.Sprintf(`
+variable "follow_gae_application" {
+  type    = string
+  default = null
+}
+
+resource "google_sql_database_instance" "instance" {
+  name                = "%s"
+  database_version    = "POSTGRES_15"
+  region              = "us-central1"
+  deletion_protection = false
+
+  settings {
+    tier        = "db-f1-micro"
+    user_labels = { env = "updated" }
+
+    location_preference {
+      zone                   = "us-central1-a"
+      follow_gae_application = var.follow_gae_application
+    }
+  }
+}
+`, instanceName)
+}
